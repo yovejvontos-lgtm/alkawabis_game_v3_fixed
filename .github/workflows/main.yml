@@ -1,0 +1,79 @@
+name: Build Flutter APK
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      FLUTTER_VERSION: "3.24.5"
+      FLUTTER_ROOT: ${{ github.workspace }}/_flutter
+    steps:
+      - uses: actions/checkout@v4
+
+      # يبحث عن pubspec.yaml تلقائياً ليحل خطأ "project root" حتى لو كان المشروع داخل مجلد فرعي
+      - name: Locate Flutter project
+        run: |
+          set -e
+          PUBSPEC=$(find . -name pubspec.yaml -not -path "*/.*" -not -path "*/build/*" -not -path "*/_flutter/*" | awk '{ print length, $0 }' | sort -n | head -1 | cut -d' ' -f2-)
+          if [ -z "$PUBSPEC" ]; then
+            echo "::error::لم يُعثر على pubspec.yaml في المستودع. محتويات المستودع:"
+            ls -R | head -50
+            exit 1
+          fi
+          DIR=$(dirname "$PUBSPEC")
+          echo "Flutter project directory: $DIR"
+          echo "PROJECT_DIR=$DIR" >> "$GITHUB_ENV"
+
+      - name: Set up Java 17 (no cache)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      # تثبيت Flutter بـ git clone بدل أي خدمة Cache، فلا يتأثر بتوقف GitHub Cache
+      - name: Install Flutter ${{ env.FLUTTER_VERSION }}
+        run: |
+          git clone --depth 1 --branch "$FLUTTER_VERSION" https://github.com/flutter/flutter.git "$FLUTTER_ROOT"
+          echo "$FLUTTER_ROOT/bin" >> "$GITHUB_PATH"
+          echo "$FLUTTER_ROOT/bin/cache/dart-sdk/bin" >> "$GITHUB_PATH"
+
+      - name: Flutter doctor
+        run: |
+          flutter --suppress-analytics config --no-analytics
+          flutter precache --android
+          yes | flutter doctor --android-licenses || true
+          flutter doctor -v
+          java -version
+
+      - name: Prepare android/local.properties
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          echo "flutter.sdk=$FLUTTER_ROOT" > android/local.properties
+          echo "sdk.dir=${ANDROID_HOME:-$ANDROID_SDK_ROOT}" >> android/local.properties
+          cat android/local.properties
+
+      - name: Get dependencies (with retry)
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          for i in 1 2 3; do
+            flutter pub get && exit 0
+            echo "pub get failed (attempt $i), retrying..."
+            sleep 10
+          done
+          exit 1
+
+      - name: Build APK
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: flutter build apk --release --no-tree-shake-icons
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-release
+          path: ${{ env.PROJECT_DIR }}/build/app/outputs/flutter-apk/app-release.apk
+          retention-days: 7
